@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!LICENSE
+!config/
+!config/**
+!docker-entrypoint.d/
+!docker-entrypoint.d/**
