@@ -1,0 +1,117 @@
+name: Gateway checks and image publishing
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gateway:
+    name: Build, test, and publish gateway
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GATEWAY_TEST_IMAGE: nofm-audio-gateway:ci
+      GATEWAY_FIXTURE_IMAGE: nofm-audio-gateway-fixture:ci
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '24.22.0'
+
+      - name: Lint with Super-Linter
+        uses: super-linter/super-linter/slim@2da136927bd4a73596db63044b504547c62cb854  # v9.0.0
+        env:
+          VALIDATE_ALL_CODEBASE: true
+          USE_FIND_ALGORITHM: true
+          ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
+          MULTI_STATUS: false
+          VALIDATE_DOCKERFILE_HADOLINT: true
+          VALIDATE_BASH: true
+          VALIDATE_GITHUB_ACTIONS: true
+          VALIDATE_BIOME_LINT: true
+          VALIDATE_JSON: true
+          VALIDATE_YAML: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
+
+      - name: Build and load gateway for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.GATEWAY_TEST_IMAGE }}
+
+      - name: Validate rendered Nginx configuration
+        run: |
+          docker run --rm --entrypoint sh "$GATEWAY_TEST_IMAGE" -n /docker-entrypoint.d/19-validate-upstream.sh
+          docker run --rm --env NOFM_UPSTREAM=127.0.0.1:8090 "$GATEWAY_TEST_IMAGE" nginx -t
+
+      - name: Build and load integration fixture
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: test/fixture
+          load: true
+          push: false
+          tags: ${{ env.GATEWAY_FIXTURE_IMAGE }}
+
+      - name: Test the built gateway image
+        run: npm test
+
+      - name: Validate release settings
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: |
+          node --input-type=module <<'JS'
+          if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(process.env.GITHUB_REF_NAME)) {
+            throw new Error('Release tags must use vMAJOR.MINOR.PATCH');
+          }
+          if (!/^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9._-]*$/.test(process.env.DOCKERHUB_IMAGE ?? '')) {
+            throw new Error('Set DOCKERHUB_IMAGE to namespace/repository without a registry or tag');
+          }
+          JS
+
+      - name: Generate image tags and labels
+        id: metadata
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6
+        with:
+          images: docker.io/${{ vars.DOCKERHUB_IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,format=long
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish multi-platform image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
