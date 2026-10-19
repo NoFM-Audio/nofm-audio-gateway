@@ -1,0 +1,13 @@
+{
+  "name": "nofm-audio-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visitor-only gateway for NoFM Audio",
+  "license": "AGPL-3.0-or-later",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "check": "node --check test/gateway.test.mjs && node --check test/fixture/server.mjs && node --check test/server.test.mjs",
+    "test": "node --test test/gateway.test.mjs"
+  }
+}
